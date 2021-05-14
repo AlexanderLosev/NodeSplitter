@@ -29,46 +29,66 @@ public class SplitNode {
         tx.acquireWriteLock(node);
 
         ArrayList<Relationship> ignoreIncomingRelationships = new ArrayList<>();
-        ArrayList<Relationship> incomingRelationships = new ArrayList<>();
         node.getRelationships(Direction.INCOMING).forEach(relationship -> {
             tx.acquireWriteLock(relationship.getOtherNode(node));
-            if (config.getRelationshipTypes().contains(relationship.getType().name())) {
-                incomingRelationships.add(relationship);
-            } else {
+            if (!config.getRelationshipTypes().contains(relationship.getType().name())) {
                 ignoreIncomingRelationships.add(relationship);
             }
         });
 
         ArrayList<Relationship> ignoreOutgoingRelationships = new ArrayList<>();
-        ArrayList<Relationship> outgoingRelationships = new ArrayList<>();
         node.getRelationships(Direction.OUTGOING).forEach(relationship -> {
             tx.acquireWriteLock(relationship.getOtherNode(node));
-            if (config.getRelationshipTypes().contains(relationship.getType().name())) {
-                outgoingRelationships.add(relationship);
-            } else {
+            if (!config.getRelationshipTypes().contains(relationship.getType().name())) {
                 ignoreOutgoingRelationships.add(relationship);
             }
         });
 
-        if (incomingRelationships.isEmpty() || outgoingRelationships.isEmpty())
+        int index = config.getStartIndex();
+        String indexProperty = config.getIndexPropertyName();
+        List<Node> allEnterNodes = new ArrayList<>();
+        List<Node> allExitNodes = new ArrayList<>();
+        for(String relationType: config.getRelationshipTypes()) {
+            ArrayList<Relationship> incomingRelationships = new ArrayList<>();
+            node.getRelationships(Direction.INCOMING).forEach(relationship -> {
+                tx.acquireWriteLock(relationship.getOtherNode(node));
+                if (relationship.getType().name().equals(relationType)) {
+                    incomingRelationships.add(relationship);
+                }
+            });
+
+            ArrayList<Relationship> outgoingRelationships = new ArrayList<>();
+            node.getRelationships(Direction.OUTGOING).forEach(relationship -> {
+                tx.acquireWriteLock(relationship.getOtherNode(node));
+                if (relationship.getType().name().equals(relationType)) {
+                    outgoingRelationships.add(relationship);
+                }
+            });
+
+            if (incomingRelationships.isEmpty() || outgoingRelationships.isEmpty())
+                continue;
+
+            List<Node> enterNodes = createSplitNodes(node, incomingRelationships, indexProperty, index, Direction.INCOMING);
+            index += enterNodes.size();
+            List<Node> exitNodes = createSplitNodes(node, outgoingRelationships, indexProperty, index, Direction.OUTGOING);
+            index += exitNodes.size();
+
+            for (Node enterNode : enterNodes) {
+                Relationship relationship = Iterables.first(enterNode.getRelationships());
+                for (Node exitNode : exitNodes) {
+                    createRelationship(enterNode, exitNode, relationship);
+                }
+            }
+            allEnterNodes.addAll(enterNodes);
+            allExitNodes.addAll(exitNodes);
+        }
+        if (allEnterNodes.isEmpty() && allExitNodes.isEmpty())
             return Collections.emptyList();
 
-        String indexProperty = config.getIndexPropertyName();
-        int index = config.getStartIndex();
-        List<Node> enterNodes = createSplitNodes(node, incomingRelationships, indexProperty, index, Direction.INCOMING);
-        List<Node> exitNodes = createSplitNodes(node, outgoingRelationships, indexProperty, index + enterNodes.size(), Direction.OUTGOING);
-
-        for (Node enterNode : enterNodes) {
-            Relationship relationship = Iterables.first(enterNode.getRelationships());
-            for (Node exitNode : exitNodes) {
-                createRelationship(enterNode, exitNode, relationship);
-            }
-        }
-        repairRelationships(enterNodes, exitNodes, ignoreIncomingRelationships, ignoreOutgoingRelationships);
-
+        repairRelationships(allEnterNodes, allExitNodes, ignoreIncomingRelationships, ignoreOutgoingRelationships);
 
         detachDeleteNode(node);
-        return Stream.concat(enterNodes.stream(), exitNodes.stream()).collect(Collectors.toList());
+        return Stream.concat(allEnterNodes.stream(), allExitNodes.stream()).collect(Collectors.toList());
     }
 
     private void createRelationship(Node from, Node to, Relationship source) {
