@@ -6,11 +6,13 @@ public class SplitNodeConfiguration {
     private static final String START_INDEX = "startIndex";
     private static final String INDEX_PROPERTY_NAME = "indexProperty";
     private static final String RELATIONSHIP_TYPES = "relationshipTypes";
+    private static final String GREEDY_RELATIONSHIP_TYPES = "greedyRelationshipTypes";
 
 
     private final String indexPropertyName;
     private int startIndex;
     private HashSet<String> relationshipTypes;
+    private HashSet<String> greedyRelationshipTypes;
 
     public static SplitNodeConfiguration build(Map<String,Object> configuration) {
         return new SplitNodeConfiguration(configuration);
@@ -21,7 +23,8 @@ public class SplitNodeConfiguration {
         this.indexPropertyName = indexPropertyName == null ? null : indexPropertyName.toString();
 
         parseStartIndex(configuration);
-        parseRelationshipTypes(configuration);
+        relationshipTypes = parseRelationshipTypes(configuration, RELATIONSHIP_TYPES);
+        greedyRelationshipTypes = parseRelationshipTypes(configuration, GREEDY_RELATIONSHIP_TYPES);
     }
 
     public String getIndexPropertyName() {
@@ -34,6 +37,10 @@ public class SplitNodeConfiguration {
 
     public Set<String> getRelationshipTypes() {
         return this.relationshipTypes;
+    }
+
+    public Set<String> getGreedyRelationshipTypes() {
+        return this.greedyRelationshipTypes;
     }
 
     private void parseStartIndex(Map<String,Object> configuration) throws RuntimeException {
@@ -49,17 +56,17 @@ public class SplitNodeConfiguration {
         }
     }
 
-    private void parseRelationshipTypes(Map<String,Object> configuration) throws RuntimeException {
-        Object relationshipTypesValue = configuration.get(RELATIONSHIP_TYPES);
+    private HashSet<String> parseRelationshipTypes(Map<String,Object> configuration, String parameterName) throws RuntimeException {
+        Object relationshipTypesValue = configuration.get(parameterName);
         if (relationshipTypesValue == null) {
-            relationshipTypes = new HashSet<>(0);
+            return new HashSet<>(0);
         }
         else if (relationshipTypesValue instanceof ArrayList) {
             ArrayList<String> values = (ArrayList<String>)relationshipTypesValue;
-            relationshipTypes = new HashSet<>(values);
+            return new HashSet<>(values);
         }
         else {
-            throw new RuntimeException("Unable to parse " + RELATIONSHIP_TYPES + "value");
+            throw new RuntimeException("Unable to parse " + parameterName + "value");
         }
     }
 }
