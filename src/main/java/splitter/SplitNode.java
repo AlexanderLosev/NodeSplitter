@@ -7,7 +7,6 @@ import splitter.config.SplitNodeConfiguration;
 import splitter.results.SplitNodeResult;
 
 import java.util.*;
-import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -29,6 +28,7 @@ public class SplitNode {
         Transaction tx = db.beginTx();
         tx.acquireWriteLock(node);
 
+        //collecting incoming relationships for which new nodes will not be created
         ArrayList<Relationship> ignoreIncomingRelationships = new ArrayList<>();
         node.getRelationships(Direction.INCOMING).forEach(relationship -> {
             tx.acquireWriteLock(relationship.getOtherNode(node));
@@ -38,6 +38,7 @@ public class SplitNode {
             }
         });
 
+        //collecting outgoing relationships for which new nodes will not be created
         ArrayList<Relationship> ignoreOutgoingRelationships = new ArrayList<>();
         node.getRelationships(Direction.OUTGOING).forEach(relationship -> {
             tx.acquireWriteLock(relationship.getOtherNode(node));
@@ -49,49 +50,70 @@ public class SplitNode {
 
         int index = config.getStartIndex();
         String indexProperty = config.getIndexPropertyName();
-        List<Node> enterNodes = new ArrayList<>();
-        List<Node> exitNodes = new ArrayList<>();
-        List<Node> lazyNodeList = new ArrayList<>();
+        //collections for created nodes
+        List<Node> entrySplitNodes = new ArrayList<>();
+        List<Node> exitSplitNodes = new ArrayList<>();
 
         for(String relationType: config.getRelationshipTypes()) {
-            index += createSplitNodes(tx, node, relationType, indexProperty, index, lazyNodeList, enterNodes, exitNodes);
-        }
-        lazyNodeList.addAll(exitNodes);
-        for(String relationType: config.getGreedyRelationshipTypes()) {
-            index += createSplitNodes(tx, node, relationType, indexProperty, index, lazyNodeList, enterNodes, exitNodes);
+            //for each "non-greedy" type of relationship create nodes and copy relationships separately
+            index += createSplitNodesForRelationsipType(tx, node, relationType, indexProperty, index, new ArrayList<>(), entrySplitNodes, exitSplitNodes);
         }
 
-        if (enterNodes.isEmpty() && exitNodes.isEmpty())
+        //collection for nodes which were created for outgoing "non-greedy" relationships
+        //additional incoming "greedy" relationships will be created for this nodes
+        List<Node> exitSplitNodesForNonGreedyRelationships = new ArrayList<>(exitSplitNodes);
+
+        for(String relationType: config.getGreedyRelationshipTypes()) {
+            //for each "greedy" type of relationship create nodes and copy relationships separately
+            index += createSplitNodesForRelationsipType(tx, node, relationType, indexProperty, index, exitSplitNodesForNonGreedyRelationships, entrySplitNodes, exitSplitNodes);
+        }
+
+        //if no nodes were created return empty collection and leave source node alone
+        if (entrySplitNodes.isEmpty() && exitSplitNodes.isEmpty())
             return Collections.emptyList();
 
-        repairRelationships(enterNodes, exitNodes, ignoreIncomingRelationships, ignoreOutgoingRelationships);
+        //copy relationships for which new nodes were not created for each created node
+        repairRelationships(entrySplitNodes, exitSplitNodes, ignoreIncomingRelationships, ignoreOutgoingRelationships);
 
+        //delete source node
         detachDeleteNode(node);
-        return Stream.concat(enterNodes.stream(), exitNodes.stream()).collect(Collectors.toList());
+        return Stream.concat(entrySplitNodes.stream(), exitSplitNodes.stream()).collect(Collectors.toList());
     }
 
-    private int createSplitNodes(Transaction tx, Node node, String relationType, String indexProperty, int startIndex, List<Node> lazyNodes, List<Node> resultEnterNodes, List<Node> resultExitNodes) {
+    /// returns count of created nodes
+    private int createSplitNodesForRelationsipType(Transaction tx, Node node, String relationType, String indexProperty, int startIndex, List<Node> nonGreedyExitNodes, List<Node> resultEntryNodes, List<Node> resultExitNodes) {
+        //collect source node relationships of target type
         List<Relationship> incomingRelationships = getRelationsips(tx, node, Direction.INCOMING, relationType);
         List<Relationship> outgoingRelationships = getRelationsips(tx, node, Direction.OUTGOING, relationType);
 
-        if (incomingRelationships.isEmpty() || (outgoingRelationships.isEmpty() && lazyNodes.isEmpty()))
+        //if incoming relationships not found or no and will not be nodes with outgoing relationships
+        //then exit
+        if (incomingRelationships.isEmpty() || (outgoingRelationships.isEmpty() && nonGreedyExitNodes.isEmpty()))
             return 0;
 
         int index = startIndex;
-        List<Node> enterNodes = createSplitNodes(node, incomingRelationships, indexProperty, index, Direction.INCOMING);
+        //create separate node for each incoming relationship of target type
+        List<Node> enterNodes = createSplitNodesForRelationsips(node, incomingRelationships, indexProperty, index, Direction.INCOMING);
         index += enterNodes.size();
-        List<Node> exitNodes = createSplitNodes(node, outgoingRelationships, indexProperty, index, Direction.OUTGOING);
+        //create separate node for each outgoing relationship of target type
+        List<Node> exitNodes = createSplitNodesForRelationsips(node, outgoingRelationships, indexProperty, index, Direction.OUTGOING);
 
+        //copy relationships
         for (Node enterNode : enterNodes) {
             Relationship relationship = Iterables.first(enterNode.getRelationships());
             for (Node exitNode : exitNodes) {
+                //copy relationship and connect incoming and outgoing nodes
                 createRelationship(enterNode, exitNode, relationship);
             }
-            for (Node exitNode : lazyNodes) {
+            //if nonGreedyExitNodes is not empty then this relationship type is "greedy"
+            //so connect "greedy" entry node to "non-greedy" exit node
+            for (Node exitNode : nonGreedyExitNodes) {
+                //copy relationship and connect incoming and outgoing "non-greedy" nodes
                 createRelationship(enterNode, exitNode, relationship);
             }
         }
-        resultEnterNodes.addAll(enterNodes);
+        //copy created nodes to result collections
+        resultEntryNodes.addAll(enterNodes);
         resultExitNodes.addAll(exitNodes);
         return enterNodes.size() + exitNodes.size();
     }
@@ -125,12 +147,10 @@ public class SplitNode {
         }
     }
 
-    private List<Node> createSplitNodes(Node source, List<Relationship> relationships, String indexProperty, int startIndex, Direction direction) {
-        Label[] labels = Iterables.asArray(Label.class, source.getLabels());
+    private List<Node> createSplitNodesForRelationsips(Node source, List<Relationship> relationships, String indexProperty, int startIndex, Direction direction) {
         ArrayList<Node> splitNodes = new ArrayList<>(relationships.size());
         for (Relationship relationship : relationships) {
-            Node splitNode = createSplitNode(labels, indexProperty, startIndex);
-            copyNodeProperties(source, splitNode);
+            Node splitNode = createSplitNode(source, indexProperty, startIndex);
             if (direction == Direction.INCOMING) {
                 Node otherNode = relationship.getStartNode();
                 createRelationship(otherNode, splitNode, relationship);
@@ -144,14 +164,12 @@ public class SplitNode {
         return splitNodes;
     }
 
-    private Node createSplitNode(Label[] labels, String indexPropertyName, int index) {
+    private Node createSplitNode(Node source, String indexPropertyName, int index) {
+        Label[] labels = Iterables.asArray(Label.class, source.getLabels());
         Node node = db.createNode(labels);
         if (indexPropertyName != null) { node.setProperty(indexPropertyName, index); }
+        source.getAllProperties().forEach(node::setProperty);
         return node;
-    }
-
-    private void copyNodeProperties(Node source, Node target) {
-        source.getAllProperties().forEach(target::setProperty);
     }
 
     private void repairRelationships(List<Node> enterNodes, List<Node> exitNodes, List<Relationship> incoming, List<Relationship> outgoing) {
