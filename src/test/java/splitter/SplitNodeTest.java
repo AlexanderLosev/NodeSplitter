@@ -131,8 +131,8 @@ public class SplitNodeTest {
             assertEquals(4, incomGreedyRelRecords.size());
 
             List<Record> outgoingGreedyRelRecords = session.run("MATCH (n:D)-[:OtherRel]->() where n.TestId = 2 return distinct n").list();
-            // outgoing other relations are: 2(3-i)->2(1), 2(1)->1, 2(3-i)->2(3-o), 2(3-i)->2(4)
-            assertEquals(2, outgoingGreedyRelRecords.size());
+            // outgoing other relations are: 2(3-i)->2(1-o), 2(1-o)->1, 2(3-i)->2(3-o), 2(3-i)->2(4) + 2(1-i)->2(1-o),2(4-i)->2(1-o)
+            assertEquals(4, outgoingGreedyRelRecords.size());
         }
     }
 
